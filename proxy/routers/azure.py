@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
-import httpx
 import os
 import json
+import re
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from openai import AsyncAzureOpenAI, APIError
 from proxy.utils import logger
 
 router = APIRouter()
@@ -11,128 +12,133 @@ AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "https://YOUR_RESOURCE_NAME.
 # Ensure no trailing slash
 AZURE_ENDPOINT = AZURE_ENDPOINT.rstrip("/")
 
-async def forward_request(request: Request, path: str):
+@router.post("/{path:path}")
+async def azure_proxy(request: Request, path: str):
     """
-    Forwards the request to Azure OpenAI and handles response streaming/logging.
+    Handles Azure OpenAI requests using the official SDK.
+    Expected path format: openai/deployments/{deployment}/chat/completions
     """
+    # 1. Parse Deployment from Path
+    # Pattern: openai/deployments/{deployment_id}/chat/completions
+    match = re.search(r"deployments/([^/]+)/chat/completions", path)
+    if not match:
+        # Fallback or error if not a chat completion path we support
+        # For now, we strictly support chat completions as requested by the move to SDK which is typed
+        raise HTTPException(status_code=400, detail="Only chat/completions endpoints are supported with the SDK refactor.")
+    
+    deployment_id = match.group(1)
+    
+    # 2. Get API Key and Version
+    api_key = request.headers.get("api-key")
+    api_version = request.query_params.get("api-version", "2024-02-15-preview")
+    
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing api-key header")
+
+    # 3. Parse Body
     try:
         body = await request.json()
     except Exception:
         body = {}
 
-    # If streaming, ensure stream_options is set to get usage in the final chunk (OpenAI spec)
+    # Log Input
+    logger.info(f"Azure Request Input: {json.dumps(body)}")
+
+    # 4. Prepare Client
+    client = AsyncAzureOpenAI(
+        azure_endpoint=AZURE_ENDPOINT,
+        api_key=api_key,
+        api_version=api_version,
+    )
+
+    # 5. Handle Parameters
+    # Map body to SDK arguments
+    # deployment_name is passed explicitly or via the client if configured, 
+    # but `chat.completions.create` takes `model` which equates to deployment in Azure SDK usually,
+    # OR we rely on the resource path. 
+    # Actually, AsyncAzureOpenAI uses `azure_deployment` argument or `model`.
+    # Let's use `model=deployment_id` which usually maps correctly in the python sdk for Azure.
+    
+    # Ensure stream_options for token counting in streams
     if body.get("stream", False):
         if "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
         elif isinstance(body["stream_options"], dict):
              body["stream_options"]["include_usage"] = True
 
-    # Log Input
-    logger.info(f"Azure Request Input: {json.dumps(body)}")
-
-    # Construct target URL
-    # Path includes /openai/deployments/...
-    url = f"{AZURE_ENDPOINT}/{path}?{request.url.query}"
-    
-    headers = dict(request.headers)
-    # Remove host header to avoid SNI errors
-    headers.pop("host", None)
-    headers.pop("content-length", None) # Let httpx handle this
-
-    client = httpx.AsyncClient()
-    
-    req = client.build_request(
-        request.method,
-        url,
-        headers=headers,
-        json=body,
-        timeout=60.0
-    )
-
     try:
-        r = await client.send(req, stream=True)
-    except Exception as e:
-        logger.error(f"Failed to connect to Azure OpenAI: {e}")
-        raise HTTPException(status_code=502, detail="Upstream connection failed")
+        # Filter arguments to match create method signature roughly or pass **body
+        # We need to ensure 'model' is set. 
+        if "model" not in body:
+             body["model"] = deployment_id
 
-    if r.status_code != 200:
-        # Non-200 response, just stream it back without fancy logic
-        return StreamingResponse(
-            r.aiter_bytes(),
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type"),
-            background=None
-        )
-
-    # Handle Streaming vs Non-Streaming
-    if body.get("stream", False):
-        return StreamingResponse(
-            stream_response_generator(r),
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type")
-        )
-    else:
-        # For non-streaming, we can read the whole body to count usage
-        # But since we are inside a stream context (client.send(stream=True)), we need to read it.
-        content = await r.aread()
-        await client.aclose()
+        response = await client.chat.completions.create(**body)
         
-        try:
-            response_json = json.loads(content)
-            usage = response_json.get("usage", {})
-            total_tokens = usage.get("total_tokens", 0)
+        if body.get("stream", False):
+             return StreamingResponse(
+                stream_response_generator(response),
+                media_type="application/json"
+            )
+        else:
+            # Non-streaming response is an object, need to serialize
+            # response is a ChatCompletion object
+            # We can use .model_dump() or .to_dict() (depending on version, model_dump is pydantic v2 in v1.x sdk)
+            response_dict = response.model_dump()
             
+            # Log usage
+            usage = response_dict.get("usage", {})
+            total_tokens = usage.get("total_tokens", 0)
             if total_tokens > 0:
                  logger.info(f"Azure Request Finished | Total Tokens: {total_tokens}")
+
+            # Log Output (Text of choices)
+            output_text = ""
+            for choice in response_dict.get("choices", []):
+                msg = choice.get("message", {})
+                content = msg.get("content", "")
+                if content:
+                    output_text += content
             
-            logger.info(f"Azure Response Output: {content.decode('utf-8', errors='replace')}")
+            logger.info(f"Azure Response Output: {output_text}")
 
-            return JSONResponse(content=response_json, status_code=r.status_code)
-        except Exception as e:
-            logger.error(f"Error parsing azure response: {e}")
-            return JSONResponse(content=json.loads(content), status_code=r.status_code)
+            return JSONResponse(content=response_dict)
+
+    except APIError as e:
+        logger.error(f"Azure OpenAI Error: {e}")
+        # Return a json response with the error details
+        return JSONResponse(status_code=e.status_code or 500, content={"error": e.message})
+    except Exception as e:
+        logger.error(f"Internal Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-async def stream_response_generator(response: httpx.Response):
+async def stream_response_generator(response_iterator):
     """
-    Yields chunks from the upstream response and accumulates token usage.
+    Yields chunks from the SDK async iterator and accumulates usage/text.
     """
     output_text = ""
-    # Azure/OpenAI stream format: data: {...} \n\n
-    async for line in response.aiter_lines():
-        if line:
-            yield line + "\n"
-            if line.startswith("data: ") and line != "data: [DONE]":
-                try:
-                    chunk_data = json.loads(line[6:])
-                    # Check for usage field in the last chunk (if stream_options included)
-                    if "usage" in chunk_data and chunk_data["usage"]:
-                        # Usage found in stream!
-                        total = chunk_data["usage"].get("total_tokens")
-                        logger.info(f"Azure Stream Finished (Usage Reported) | Total Tokens: {total}")
-                    
-                    choices = chunk_data.get("choices", [])
-                    for choice in choices:
-                        delta = choice.get("delta", {}) # Chat completion
-                        text = choice.get("text", "")   # Legacy completion
-                        
-                        content = delta.get("content", "")
-                        if content:
-                            output_text += content
-                        if text:
-                            output_text += text
+    # The iterator yields ChatCompletionChunk objects
+    async for chunk in response_iterator:
+        # Convert chunk to dict for logging/serialization
+        chunk_dict = chunk.model_dump()
+        
+        # Serialize to SSE format: data: {...}
+        yield f"data: {json.dumps(chunk_dict)}\n\n"
+        
+        # Usage check
+        usage = chunk_dict.get("usage", None)
+        if usage:
+            total = usage.get("total_tokens", 0)
+            logger.info(f"Azure Stream Finished (Usage Reported) | Total Tokens: {total}")
+        
+        # Output text accumulation
+        choices = chunk_dict.get("choices", [])
+        for choice in choices:
+            delta = choice.get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                output_text += content
 
-                except Exception:
-                    pass
+    yield "data: [DONE]\n\n"
     
-    await response.aclose()
     logger.info(f"Azure Stream Output: {output_text}")
-
-
-@router.post("/{path:path}")
-async def azure_proxy(request: Request, path: str):
-    """
-    Catch-all for Azure OpenAI paths.
-    Expected path format: openai/deployments/{deployment}/chat/completions
-    """
-    return await forward_request(request, path)

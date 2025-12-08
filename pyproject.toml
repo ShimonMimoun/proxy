@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "orjson>=3.10.0",
     "aioboto3>=1.2.0",
+    "openai>=1.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
