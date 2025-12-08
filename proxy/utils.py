@@ -1,0 +1,18 @@
+import logging
+import sys
+from typing import Any, Dict, Optional
+
+# Setup Logging
+def setup_logging():
+    """Configures the root logger to output JSON-like or structured English logs."""
+    logger = logging.getLogger("proxy")
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+logger = setup_logging()

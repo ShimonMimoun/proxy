@@ -1,0 +1,18 @@
+[project]
+name = "proxy"
+version = "0.1.0"
+description = "Async proxy for Azure OpenAI and AWS Bedrock with token logging"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "httpx>=0.27.0",
+    "boto3>=1.34.0",
+    "python-dotenv>=1.0.0",
+    "orjson>=3.10.0",
+    "aioboto3>=1.2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["proxy"]
