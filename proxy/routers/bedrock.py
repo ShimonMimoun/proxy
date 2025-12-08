@@ -170,9 +170,6 @@ async def bedrock_stream_generator(stream, operation):
                 input_tokens = usage.get("inputTokens", 0)
                 output_tokens = usage.get("outputTokens", 0)
             
-                    if "text" in part:
-                        output_text += part["text"]
-            
             # For InvokeModelWithResponseStream, usage might be in 'internalServerException' metadata or similar?
             # Actually, standard InvokeModel stream usually doesn't send explicit usage event for all models, 
             # but for some like Claude 3 it does in the final event or as a specific chunk.

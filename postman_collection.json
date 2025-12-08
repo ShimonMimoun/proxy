@@ -1,0 +1,227 @@
+{
+    "info": {
+        "_postman_id": "b3f0b8cc-19e1-4172-bb23-af52cda221fc",
+        "name": "AI Proxy Collection",
+        "description": "Collection of example requests for the Python AI Proxy supporting Azure OpenAI and AWS Bedrock.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Azure OpenAI",
+            "item": [
+                {
+                    "name": "Chat Completion (Non-Stream)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "api-key",
+                                "value": "{{AZURE_API_KEY}}",
+                                "type": "text"
+                            },
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json",
+                                "type": "text"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"messages\": [\n    {\"role\": \"system\", \"content\": \"You are a helpful assistant.\"},\n    {\"role\": \"user\", \"content\": \"Hello!\"}\n  ],\n  \"max_tokens\": 50\n}"
+                        },
+                        "url": {
+                            "raw": "{{BASE_URL}}/azure/openai/deployments/{{AZURE_DEPLOYMENT}}/chat/completions?api-version=2024-02-15-preview",
+                            "host": [
+                                "{{BASE_URL}}"
+                            ],
+                            "path": [
+                                "azure",
+                                "openai",
+                                "deployments",
+                                "{{AZURE_DEPLOYMENT}}",
+                                "chat",
+                                "completions"
+                            ],
+                            "query": [
+                                {
+                                    "key": "api-version",
+                                    "value": "2024-02-15-preview"
+                                }
+                            ]
+                        }
+                    },
+                    "response": []
+                },
+                {
+                    "name": "Chat Completion (Stream)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "api-key",
+                                "value": "{{AZURE_API_KEY}}",
+                                "type": "text"
+                            },
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json",
+                                "type": "text"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Tell me a story about a proxy server.\"}\n  ],\n  \"stream\": true,\n  \"max_tokens\": 100\n}"
+                        },
+                        "url": {
+                            "raw": "{{BASE_URL}}/azure/openai/deployments/{{AZURE_DEPLOYMENT}}/chat/completions?api-version=2024-02-15-preview",
+                            "host": [
+                                "{{BASE_URL}}"
+                            ],
+                            "path": [
+                                "azure",
+                                "openai",
+                                "deployments",
+                                "{{AZURE_DEPLOYMENT}}",
+                                "chat",
+                                "completions"
+                            ],
+                            "query": [
+                                {
+                                    "key": "api-version",
+                                    "value": "2024-02-15-preview"
+                                }
+                            ]
+                        }
+                    },
+                    "response": []
+                }
+            ]
+        },
+        {
+            "name": "AWS Bedrock",
+            "item": [
+                {
+                    "name": "InvokeModel (Claude 3 Sonnet)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json",
+                                "type": "text"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"anthropic_version\": \"bedrock-2023-05-31\",\n  \"max_tokens\": 100,\n  \"messages\": [\n      {\"role\": \"user\", \"content\": \"Hello Claude\"}\n  ]\n}"
+                        },
+                        "url": {
+                            "raw": "{{BASE_URL}}/bedrock/runtime/InvokeModel",
+                            "host": [
+                                "{{BASE_URL}}"
+                            ],
+                            "path": [
+                                "bedrock",
+                                "runtime",
+                                "InvokeModel"
+                            ]
+                        }
+                    },
+                    "response": []
+                },
+                {
+                    "name": "Converse (Claude 3)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json",
+                                "type": "text"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"modelId\": \"anthropic.claude-3-sonnet-20240229-v1:0\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": [{\"text\": \"Hello, how are you?\"}]}\n  ]\n}"
+                        },
+                        "url": {
+                            "raw": "{{BASE_URL}}/bedrock/runtime/Converse",
+                            "host": [
+                                "{{BASE_URL}}"
+                            ],
+                            "path": [
+                                "bedrock",
+                                "runtime",
+                                "Converse"
+                            ]
+                        }
+                    },
+                    "response": []
+                },
+                {
+                    "name": "ConverseStream (Claude 3)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json",
+                                "type": "text"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"modelId\": \"anthropic.claude-3-sonnet-20240229-v1:0\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": [{\"text\": \"Write a poem about rust.\"}]}\n  ]\n}"
+                        },
+                        "url": {
+                            "raw": "{{BASE_URL}}/bedrock/runtime/ConverseStream",
+                            "host": [
+                                "{{BASE_URL}}"
+                            ],
+                            "path": [
+                                "bedrock",
+                                "runtime",
+                                "ConverseStream"
+                            ]
+                        }
+                    },
+                    "response": []
+                }
+            ]
+        },
+        {
+            "name": "Health Check",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{BASE_URL}}/health",
+                    "host": [
+                        "{{BASE_URL}}"
+                    ],
+                    "path": [
+                        "health"
+                    ]
+                }
+            },
+            "response": []
+        }
+    ],
+    "variable": [
+        {
+            "key": "BASE_URL",
+            "value": "http://localhost:8000",
+            "type": "string"
+        },
+        {
+            "key": "AZURE_API_KEY",
+            "value": "YOUR_AZURE_KEY",
+            "type": "string"
+        },
+        {
+            "key": "AZURE_DEPLOYMENT",
+            "value": "gpt-4",
+            "type": "string"
+        }
+    ]
+}
