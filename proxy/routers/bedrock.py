@@ -10,20 +10,52 @@ session = aioboto3.Session()
 REGION = os.getenv("AWS_REGION", "eu-central-1")
 ROLE_ARN = os.getenv("AWS_ROLE_ARN")
 
+        )
+        return resp["Credentials"]
+
+# Client Cache to avoid session creation overhead
+# Key: (region, role_arn or None) -> client
+# Since aioboto3 clients are async context managers, we need to manage their lifecycle carefully.
+# Simplified approach: Use a global session and just create clients. aioboto3 session is thread safe.
+# Actually, best practice for high scale with aioboto3 is to create one session per event loop (which we effectively have here)
+# and reuse clients? No, clients in aioboto3 are context managers.
+# Strategy: Use 'service' abstraction or keep session global (already is).
+# The overhead is mainly in `session.client` creation and credential resolution.
+# We will optimize by resolving credentials once per request (or caching credentials?) and ensuring session is reused.
+# Actually, the biggest gain is reusing the underlying botocore session logic.
+# The `session` variable is already global in this file. That helps.
+# But we can't easily cache open 'client' objects because they are async context managers meant for 'async with'.
+# However, we can use `await session.create_client(...)` without `async with` if we manage closing,
+# BUT simpler optimization for now:
+# 1. Reuse credentials if possible (boto3 does this internally via its credential provider chain).
+# 2. Reusing session is key. We are doing that.
+# 3. For assumes role, we are fetching credentials every time! This is SLOW. We must cache the assumed role credentials.
+
+import time
+_creds_cache = {"data": None, "expiry": 0}
+
 async def get_credentials():
     """
-    Returns credentials dictionary. If AWS_ROLE_ARN is set, assumes that role.
-    Otherwise returns None (letting boto3 find default credentials).
+    Returns credentials dictionary. Caches assumed role credentials to avoid calling STS every request.
     """
     if not ROLE_ARN:
         return None
+    
+    now = time.time()
+    if _creds_cache["data"] and _creds_cache["expiry"] > now:
+        return _creds_cache["data"]
         
     async with session.client("sts", region_name=REGION) as sts:
         resp = await sts.assume_role(
             RoleArn=ROLE_ARN,
-            RoleSessionName="ProxySession"
+            RoleSessionName="ProxySession",
+            DurationSeconds=3600
         )
-        return resp["Credentials"]
+        creds = resp["Credentials"]
+        _creds_cache["data"] = creds
+        # Expire 5 minutes before actual expiration
+        _creds_cache["expiry"] = creds["Expiration"].timestamp() - 300 
+        return creds
 
 @router.post("/runtime/{operation}")
 async def bedrock_runtime(operation: str, request: Request):
@@ -35,8 +67,10 @@ async def bedrock_runtime(operation: str, request: Request):
     """
     body = await request.json()
     
+    method_name = operation_to_method(operation)
+    
     # Check if this is a streaming operation
-    is_stream = operation in ["InvokeModelWithResponseStream", "ConverseStream"]
+    is_stream = method_name in ["invoke_model_with_response_stream", "converse_stream"]
     
     creds = await get_credentials()
     kwargs = {"region_name": REGION}
@@ -51,53 +85,52 @@ async def bedrock_runtime(operation: str, request: Request):
     # Log Input
     logger.info(f"Bedrock Runtime Input ({operation}): {json.dumps(body)}")
 
-    async with session.client("bedrock-runtime", **kwargs) as client:
-        method = getattr(client, operation_to_method(operation), None)
-        if not method:
-             raise HTTPException(status_code=404, detail=f"Operation {operation} not found")
-        
-        try:
             if is_stream:
-                response = await method(**body)
-                stream = response.get("body") if operation == "InvokeModelWithResponseStream" else response.get("stream")
+                # Pass parameters to generator to create client inside
                 return StreamingResponse(
-                    bedrock_stream_generator(stream, operation),
+                    bedrock_stream_generator(body, method_name, kwargs, operation),
                     media_type="application/json"
                 )
             else:
-                response = await method(**body)
+                async with session.client("bedrock-runtime", **kwargs) as client:
+                    method = getattr(client, method_name, None)
+                    if not method:
+                        raise HTTPException(status_code=404, detail=f"Operation {operation} not found")
+                    
+                    response = await method(**body)
+                    
+                    # Extract Usage
+                    input_tokens = 0
+                    output_tokens = 0
                 
-                # Extract Usage
-                input_tokens = 0
-                output_tokens = 0
-                
-                # Headers for InvokeModel
-                if "ResponseMetadata" in response:
-                    headers = response["ResponseMetadata"].get("HTTPHeaders", {})
-                    input_tokens = int(headers.get("x-amzn-bedrock-input-token-count", 0))
-                    output_tokens = int(headers.get("x-amzn-bedrock-output-token-count", 0))
-
-                # Body usage for Converse
-                if "usage" in response:
-                    input_tokens = response["usage"].get("inputTokens", 0)
-                    output_tokens = response["usage"].get("outputTokens", 0)
-
-                logger.info(f"Bedrock {operation} Finished | Tokens: {input_tokens + output_tokens} (Input: {input_tokens}, Output: {output_tokens})")
-
-                # Parse body stream if needed (InvokeModel returns 'body' as StreamingBody)
-                if "body" in response and hasattr(response["body"], "read"):
-                    response_body = await response["body"].read()
-                    logger.info(f"Bedrock Response Body: {response_body.decode('utf-8', errors='replace')}")
-                    return Response(content=response_body, media_type="application/json")
-                
-                # Check for outputText/output/etc in standard response
-                logger.info(f"Bedrock Response Output: {json.dumps(response, default=str)}")
-
-                # Clean ResponseMetadata from JSON response if we want pure data, but keeping it is fine.
-                # Remove non-serializable objects
-                clean_response = {k: v for k, v in response.items() if k != "body"}
-                return JSONResponse(content=clean_response)
-
+                    
+                    # Headers for InvokeModel
+                    if "ResponseMetadata" in response:
+                        headers = response["ResponseMetadata"].get("HTTPHeaders", {})
+                        input_tokens = int(headers.get("x-amzn-bedrock-input-token-count", 0))
+                        output_tokens = int(headers.get("x-amzn-bedrock-output-token-count", 0))
+    
+                    # Body usage for Converse
+                    if "usage" in response:
+                        input_tokens = response["usage"].get("inputTokens", 0)
+                        output_tokens = response["usage"].get("outputTokens", 0)
+    
+                    logger.info(f"Bedrock {operation} Finished | Tokens: {input_tokens + output_tokens} (Input: {input_tokens}, Output: {output_tokens})")
+    
+                    # Parse body stream if needed (InvokeModel returns 'body' as StreamingBody)
+                    if "body" in response and hasattr(response["body"], "read"):
+                        response_body = await response["body"].read()
+                        logger.info(f"Bedrock Response Body: {response_body.decode('utf-8', errors='replace')}")
+                        return Response(content=response_body, media_type="application/json")
+                    
+                    # Check for outputText/output/etc in standard response
+                    logger.info(f"Bedrock Response Output: {json.dumps(response, default=str)}")
+    
+                    # Clean ResponseMetadata from JSON response if we want pure data, but keeping it is fine.
+                    # Remove non-serializable objects
+                    clean_response = {k: v for k, v in response.items() if k != "body"}
+                    return JSONResponse(content=clean_response)
+        
         except Exception as e:
             logger.error(f"Bedrock Error ({operation}): {e}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -146,26 +179,39 @@ def operation_to_method(op: str) -> str:
     """
     # Simple conversion: ConverseStream -> converse_stream
     import re
-    return re.sub(r'(?<!^)(?=[A-Z])', '_', op).lower()
+    # Convert PascalCase to snake_case
+    snake = re.sub(r'(?<!^)(?=[A-Z])', '_', op).lower()
+    # Convert kebab-case to snake_case
+    return snake.replace("-", "_")
 
 
-async def bedrock_stream_generator(stream, operation):
+async def bedrock_stream_generator(body, method_name, client_kwargs, operation):
     """
     Yields events from Bedrock stream and logs usage from metadata events.
+    Manages client context to prevent premature closure.
     """
     input_tokens = 0
     output_tokens = 0
     output_text = ""
     
     try:
-        async for event in stream:
-            # Yield the event as a JSON line
-            yield json.dumps(serialize_event(event)) + "\n"
-            
-            # Check for usage
-            # InvokeModelWithResponseStream often has internal structure dependent on model
-            # ConverseStream has explicit 'metadata' event
-            if "metadata" in event:
+        async with session.client("bedrock-runtime", **client_kwargs) as client:
+            method = getattr(client, method_name, None)
+            if not method:
+                yield json.dumps({"error": f"Operation {operation} not found"}) + "\n"
+                return
+
+            response = await method(**body)
+            stream = response.get("body") if method_name == "invoke_model_with_response_stream" else response.get("stream")
+
+            async for event in stream:
+                # Yield the event as a JSON line
+                yield json.dumps(serialize_event(event)) + "\n"
+                
+                # Check for usage
+                # InvokeModelWithResponseStream often has internal structure dependent on model
+                # ConverseStream has explicit 'metadata' event
+                if "metadata" in event:
                 usage = event["metadata"].get("usage", {})
                 input_tokens = usage.get("inputTokens", 0)
                 output_tokens = usage.get("outputTokens", 0)

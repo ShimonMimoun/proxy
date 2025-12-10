@@ -2,10 +2,31 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import time
-from proxy.utils import logger
+from contextlib import asynccontextmanager
+from proxy.utils import logger, log_listener
 from proxy.routers import azure, bedrock
+import httpx
 
-app = FastAPI(title="AI Proxy", description="Async Proxy for Azure OpenAI and AWS Bedrock", version="0.1.0")
+# Global HTTP client for connection pooling
+http_client = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    global http_client
+    http_client = httpx.AsyncClient()
+    # Share functionality with routers via app.state
+    app.state.http_client = http_client
+    logger.info("Startup: Connection pools initialized.")
+    
+    yield
+    
+    # Shutdown
+    await http_client.aclose()
+    log_listener.stop()
+    logger.info("Shutdown: Connection pools closed.")
+
+app = FastAPI(title="AI Proxy", description="Async Proxy for Azure OpenAI and AWS Bedrock", version="0.1.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

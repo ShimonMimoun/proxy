@@ -45,10 +45,12 @@ async def azure_proxy(request: Request, path: str):
     logger.info(f"Azure Request Input: {json.dumps(body)}")
 
     # 4. Prepare Client
+    # Reuse global http client from app state
     client = AsyncAzureOpenAI(
         azure_endpoint=AZURE_ENDPOINT,
         api_key=api_key,
         api_version=api_version,
+        http_client=request.app.state.http_client
     )
 
     # 5. Handle Parameters
